@@ -154,3 +154,24 @@ references/
 examples/save
 examples/modality_pred/data
 figures/
+
+# downstream finetuning outputs
+celltype/outputs/
+celltype/output/
+celltype/runs/
+celltype/wandb/
+
+# checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# python cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# pretrained model files
+scGPT_human/
+scGPT_CP/
+scGPT_bc/
