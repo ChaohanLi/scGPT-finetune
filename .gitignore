@@ -175,3 +175,7 @@ __pycache__/
 scGPT_human/
 scGPT_CP/
 scGPT_bc/
+
+# prob task outputs
+prob/outputs_probe/
+prob/wandb/
