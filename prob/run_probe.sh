@@ -45,10 +45,12 @@ PREPROCESS="--preprocess"
 RUN_NAME="probe"                       # wandb run name prefix (dataset_id appended automatically)
 WANDB_PROJECT="scgpt-probe"
 MODEL_DIR="/lichaohan/scGPT/scGPT_human"
+SYMBOL_MAP="/lichaohan/readData/gene_id_to_symbol.tsv"  # Ensembl→HGNC map for raw-count datasets
 BATCH_SIZE=12
 N_JOBS=16
 PCA_DIM=100
 MAX_ITER=2000
+SAVE_EMBEDDINGS=""                     # set to "--save_embeddings" to also save embeddings_val.npy / labels_val.npy (needed for visualize.py)
 
 PYTHON="/lichaohan/miniconda3/envs/scvi/bin/python"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +64,7 @@ $PYTHON probe.py \
     --dataset_id  "${DATASET_ID}" \
     --n_class     "${N_CLASS}" \
     --model_dir   "${MODEL_DIR}" \
+    --symbol_map  "${SYMBOL_MAP}" \
     --output_dir  "${OUTPUT_DIR}" \
     --run_name    "${RUN_NAME}" \
     --wandb_project "${WANDB_PROJECT}" \
@@ -69,4 +72,5 @@ $PYTHON probe.py \
     --n_jobs      "${N_JOBS}" \
     --pca_dim     "${PCA_DIM}" \
     --max_iter    "${MAX_ITER}" \
-    ${PREPROCESS}
+    ${PREPROCESS} \
+    ${SAVE_EMBEDDINGS}

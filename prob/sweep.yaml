@@ -1,0 +1,31 @@
+program: probe.py
+method: grid
+metric:
+  goal: maximize
+  name: cv_test/macro_f1
+
+parameters:
+  dataset_id:
+    values:
+      - 5w_GSE196830
+      - GSE96583
+      - 10w_GSE196830
+      - 20w_GSE196830
+
+# Fixed args passed to every run.
+# ${args} expands to --dataset_id <value> for each trial.
+command:
+  - /lichaohan/miniconda3/envs/scvi/bin/python
+  - ${program}
+  - --model_dir
+  - /lichaohan/scGPT/scGPT_human
+  - --symbol_map
+  - /lichaohan/readData/gene_id_to_symbol.tsv
+  - --wandb_project
+  - scgpt-probe
+  - --batch_size
+  - "12"
+  - --n_jobs
+  - "16"
+  - --save_embeddings
+  - ${args}

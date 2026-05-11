@@ -26,6 +26,8 @@ from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
     f1_score,
+    precision_score,
+    recall_score,
 )
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
@@ -40,6 +42,40 @@ from dataset import load_data  # noqa: E402
 
 sys.path.insert(0, _PROB_DIR)
 from model import build_model   # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Dataset registry — maps dataset_id → (h5ad, n_class, preprocess)
+# Sweep agents only need to pass --dataset_id; other dataset-specific fields
+# are resolved automatically from this table.
+# ---------------------------------------------------------------------------
+DATASET_REGISTRY = {
+    "5w_symbol":     {
+        "h5ad":       "/lichaohan/readData/5w_allcelltype_anno_symbol.h5ad",
+        "n_class":    29,
+        "preprocess": False,
+    },
+    "5w_GSE196830":  {
+        "h5ad":       "/lichaohan/readData/5w_PBMC_GSE196830/5w_allcelltype.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
+    "GSE96583":      {
+        "h5ad":       "/lichaohan/readData/GSE96583_PBMC/GSE96583_merged_dedup.h5ad",
+        "n_class":    8,
+        "preprocess": True,
+    },
+    "10w_GSE196830": {
+        "h5ad":       "/lichaohan/readData/10w_PBMC_GSE196830/10w_allcelltype.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
+    "20w_GSE196830": {
+        "h5ad":       "/lichaohan/readData/20w_PBMC_GSE196830/20w_allcelltype.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
+}
 
 
 def parse_args():
@@ -187,6 +223,7 @@ def run_svc_cv(embeddings, labels, args):
         train_preds = probe.predict(x_train)
         test_preds  = probe.predict(x_test)
         print(f"  Fold {fold_idx}/{args.cv_folds}: done.", flush=True)
+        n_kept = len(keep_classes)
         return {
             "fold": fold_idx,
             "train_size": int(len(x_train)),
@@ -195,6 +232,15 @@ def run_svc_cv(embeddings, labels, args):
             "train": compute_metrics(y_train, train_preds),
             "test":  compute_metrics(y_test,  test_preds),
             "probe_steps": list(probe.named_steps.keys()),
+            "test_per_class": {
+                "f1":        f1_score(y_test, test_preds, average=None,
+                                      labels=np.arange(n_kept), zero_division=0).tolist(),
+                "precision": precision_score(y_test, test_preds, average=None,
+                                             labels=np.arange(n_kept), zero_division=0).tolist(),
+                "recall":    recall_score(y_test, test_preds, average=None,
+                                          labels=np.arange(n_kept), zero_division=0).tolist(),
+                "support":   [int((y_test == c).sum()) for c in range(n_kept)],
+            },
         }
 
     fold_metrics = Parallel(n_jobs=n_fold_jobs, backend="loky")(
@@ -211,9 +257,29 @@ def run_svc_cv(embeddings, labels, args):
             ]))
         mean_metrics[split] = split_metrics
 
+    # Aggregate per-class metrics across folds (mean ± std)
+    n_kept = len(keep_classes)
+    per_class_cv = []
+    for c in range(n_kept):
+        fold_f1s   = [fm["test_per_class"]["f1"][c]        for fm in fold_metrics]
+        fold_precs = [fm["test_per_class"]["precision"][c] for fm in fold_metrics]
+        fold_recs  = [fm["test_per_class"]["recall"][c]    for fm in fold_metrics]
+        fold_sups  = [fm["test_per_class"]["support"][c]   for fm in fold_metrics]
+        per_class_cv.append({
+            "class_idx":      int(c),
+            "mean_f1":        float(np.mean(fold_f1s)),
+            "std_f1":         float(np.std(fold_f1s)),
+            "mean_precision": float(np.mean(fold_precs)),
+            "std_precision":  float(np.std(fold_precs)),
+            "mean_recall":    float(np.mean(fold_recs)),
+            "std_recall":     float(np.std(fold_recs)),
+            "mean_support":   float(np.mean(fold_sups)),
+        })
+
     return {
         "fold_metrics": fold_metrics,
         "mean_metrics": mean_metrics,
+        "per_class_cv": per_class_cv,
         "kept_classes": [int(x) for x in keep_classes.tolist()],
         "dropped_classes": dropped_info,
         "n_samples_after_filter": int(len(labels)),
@@ -248,6 +314,13 @@ def save_fold_metrics(path, cv_result):
 
 def main():
     args = parse_args()
+    # Auto-resolve dataset-specific fields from registry (enables wandb sweep)
+    if args.dataset_id in DATASET_REGISTRY:
+        cfg = DATASET_REGISTRY[args.dataset_id]
+        args.h5ad    = cfg["h5ad"]
+        args.n_class = cfg["n_class"]
+        if cfg["preprocess"]:
+            args.preprocess = True
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -308,8 +381,9 @@ def main():
         "metrics": cv_result["mean_metrics"],
         "fold_metrics": cv_result["fold_metrics"],
         "embedding_dim": int(x_val.shape[1]),
-        "class_names": class_names,
-        "type2idx": type2idx,
+        "class_names":  class_names,
+        "per_class_cv": cv_result["per_class_cv"],
+        "type2idx":     type2idx,
         "kept_classes": cv_result["kept_classes"],
         "dropped_classes": cv_result["dropped_classes"],
         "n_samples_after_filter": cv_result["n_samples_after_filter"],
@@ -372,6 +446,24 @@ def main():
                 fold["test"]["macro_f1"],
             )
         wandb.log({"fold_metrics": fold_table})
+        # Per-class accuracy table (mean ± std across folds, test split)
+        per_class_table = wandb.Table(
+            columns=["class_name", "mean_f1", "std_f1",
+                     "mean_recall", "mean_precision", "mean_support"]
+        )
+        kept = cv_result["kept_classes"]
+        for entry in cv_result["per_class_cv"]:
+            orig = kept[entry["class_idx"]]
+            name = class_names[orig] if orig < len(class_names) else str(orig)
+            per_class_table.add_data(
+                name,
+                round(entry["mean_f1"],        4),
+                round(entry["std_f1"],         4),
+                round(entry["mean_recall"],    4),
+                round(entry["mean_precision"], 4),
+                round(entry["mean_support"],   1),
+            )
+        wandb.log({"per_class_metrics": per_class_table})
         wandb.finish()
 
 

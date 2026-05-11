@@ -66,16 +66,17 @@ python probe.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--h5ad` | `5w_allcelltype_anno_symbol.h5ad` | Input h5ad path |
-| `--dataset_id` | `5w_symbol` | Tag appended to wandb run name |
+| `--dataset_id` | `5w_symbol` | Tag appended to wandb run name and output dir |
 | `--n_class` | `29` | Expected number of cell types |
-| `--preprocess` | off | Normalize raw counts before embedding |
+| `--preprocess` | off | Normalize raw counts (`normalize_total` + `log1p`) before embedding |
+| `--symbol_map` | `None` | Path to Ensembl→HGNC TSV (`gene_id_to_symbol.tsv`); maps Ensembl var_names to HGNC before aligning to scGPT vocab |
 | `--model_dir` | `scGPT_human` | Path to pre-trained scGPT checkpoint directory |
 | `--run_name` | auto timestamp | wandb / output folder name prefix |
 | `--wandb_project` | `scgpt-probe` | wandb project name |
 | `--n_jobs` | `16` | CPU cores for parallel fold evaluation |
 | `--pca_dim` | `100` | PCA before SVC (applied to 512-dim CLS embeddings) |
 | `--no_wandb` | off | Disable wandb logging |
-| `--save_embeddings` | off | Save embeddings as `.npz` in output dir |
+| `--save_embeddings` | off | Save `embeddings_val.npy` and `labels_val.npy` in output dir (required for `visualize.py`) |
 
 ---
 
@@ -93,7 +94,20 @@ val embeddings (512-dim CLS token, no cls_decoder)
 
 ## Output
 
-Results are saved to `outputs_probe/<run_name>/`:
-- `cv_summary.json` — per-fold and aggregated metrics
+Results are saved to `outputs_probe/<run_name>_<dataset_id>/`:
 
-Metrics logged to wandb: `cv_macro_f1_mean`, `cv_macro_f1_std`, `cv_acc_mean`.
+| File | Description |
+|------|-------------|
+| `probe_metrics.json` | Scalar means, per-fold list, `per_class_cv`, kept/dropped classes |
+| `probe_fold_metrics.csv` | Per-fold train/test accuracy and F1 in CSV |
+| `class_names.json` | Ordered list of cell-type label strings |
+| `embeddings_val.npy` | Val-set 512-dim CLS embeddings — only written with `--save_embeddings` |
+| `labels_val.npy` | Val-set integer labels — only written with `--save_embeddings` |
+
+### wandb
+
+**Scalar metrics** (`cv_train/*`, `cv_test/*`): `accuracy`, `balanced_accuracy`, `macro_f1`, `weighted_f1`, `embedding_dim`.
+
+**`fold_metrics` Table**: one row per fold — fold index, train/test size, train/test accuracy and macro-F1.
+
+**`per_class_metrics` Table**: one row per kept class — `class_name`, `mean_f1 ± std_f1`, `mean_recall` (= per-class accuracy), `mean_precision`, `mean_support` (avg test samples across folds).
