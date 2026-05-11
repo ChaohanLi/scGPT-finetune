@@ -143,11 +143,19 @@ def load_data(
     batch_size:      int   = 12,
     num_workers:     int   = 4,
     max_length:      int   = MAX_LENGTH,
+    preprocess:      bool  = False,
+    symbol_map:      str   = None,
 ):
     import scanpy as sc
 
     print(f"Loading h5ad: {h5ad_path}")
     adata = sc.read_h5ad(h5ad_path)
+
+    # -- Optional preprocessing (normalize raw counts to log1p) -----------
+    if preprocess:
+        print("  Preprocessing: normalize_total + log1p (raw counts -> log1p)")
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
 
     # ── Load vocabulary ───────────────────────────────────────────────────
     vocab_file = Path(model_dir) / "vocab.json"
@@ -160,8 +168,18 @@ def load_data(
     pad_token_id = vocab[PAD_TOKEN]
 
     # ── Map genes to vocab ────────────────────────────────────────────────
-    # var_names are Ensembl IDs; gene symbols are in adata.var["gene_symbol"]
-    gene_names = list(adata.var["gene_symbol"].values)
+    # Resolve gene names: prefer explicit column, then symbol_map, then var_names
+    if "gene_symbol" in adata.var.columns:
+        gene_names = list(adata.var["gene_symbol"].values)
+    elif symbol_map:
+        import pandas as _pd
+        sym_df = _pd.read_csv(symbol_map, sep="\t", index_col=0)
+        gene_names = [sym_df.loc[g, "gene_symbol"] if g in sym_df.index
+                      else g for g in adata.var_names]
+        n_mapped = sum(1 for g in adata.var_names if g in sym_df.index)
+        print(f"  symbol_map: {n_mapped}/{len(adata.var_names)} Ensembl IDs resolved to symbols")
+    else:
+        gene_names = list(adata.var_names)
     id_in_vocab = np.array([
         vocab[g] if g in vocab else -1 for g in gene_names
     ])
