@@ -1,4 +1,5 @@
 program: probe.py
+project: scGPT-probe
 method: grid
 metric:
   goal: maximize

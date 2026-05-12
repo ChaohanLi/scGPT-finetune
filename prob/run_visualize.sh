@@ -15,11 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ─── Configuration ──────────────────────────────────────────────────────────
 # Point RUN_DIR to a single run directory (e.g. outputs_probe/probe_GSE96583_hgnc)
 # or to the outputs_probe/ root to visualize all runs at once.
-RUN_DIR="${SCRIPT_DIR}/outputs_probe"
+RUN_DIR="/lichaohan/scGPT/prob/outputs_probe"
 
 METHOD="both"      # umap | tsne | both
 MAX_CELLS=20000    # subsample to this many cells before UMAP/t-SNE
 SEED=42
+N_JOBS=4           # runs processed in parallel (each run uses 1 core; set to -1 for all cores)
 
 # ─── Run ────────────────────────────────────────────────────────────────────
 cd "${SCRIPT_DIR}"
@@ -28,4 +29,5 @@ $PYTHON visualize.py \
     --run_dir   "${RUN_DIR}" \
     --method    "${METHOD}" \
     --max_cells "${MAX_CELLS}" \
-    --seed      "${SEED}"
+    --seed      "${SEED}" \
+    --n_jobs    "${N_JOBS}"
