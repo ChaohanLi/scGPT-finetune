@@ -8,10 +8,13 @@ metric:
 parameters:
   dataset_id:
     values:
-      - 5w_GSE196830
-      - GSE96583
-      - 10w_GSE196830
-      - 20w_GSE196830
+#      - 5w_GSE196830
+#      - GSE96583
+#      - 10w_GSE196830
+#      - 20w_GSE196830
+#      - 40w_GSE196830
+      - 80w_GSE196830
+      - 120w_GSE196830
 
 # Fixed args passed to every run.
 # ${args} expands to --dataset_id <value> for each trial.
@@ -25,8 +28,10 @@ command:
   - --wandb_project
   - scgpt-probe
   - --batch_size
-  - "12"
+  - "24"
   - --n_jobs
   - "16"
+  - --n_hvg
+  - "0"
   - --save_embeddings
   - ${args}

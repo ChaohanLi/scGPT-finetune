@@ -75,6 +75,21 @@ DATASET_REGISTRY = {
         "n_class":    29,
         "preprocess": True,
     },
+    "40w_GSE196830": {
+        "h5ad":       "/lichaohan/readData/40w_PBMC_GSE196830/GSE196830_40w_subset.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
+    "80w_GSE196830": {
+        "h5ad":       "/lichaohan/readData/80w_PBMC_GSE196830/GSE196830_80w_subset.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
+    "120w_GSE196830": {
+        "h5ad":       "/lichaohan/readData/120w_PBMC_GSE196830/GSE196830_120w_subset.h5ad",
+        "n_class":    29,
+        "preprocess": True,
+    },
 }
 
 
@@ -88,7 +103,7 @@ def parse_args():
                    default="/lichaohan/readData/5w_allcelltype_anno_symbol.h5ad")
     p.add_argument("--dataset_id", type=str, default="5w_symbol",
                    help="Short dataset tag appended to run_name (e.g. 5w_symbol, "
-                        "5w_GSE196830, GSE96583, 10w_GSE196830, 20w_GSE196830)")
+                        "5w_GSE196830, GSE96583, 10w_GSE196830, 20w_GSE196830, 40w_GSE196830)")
     p.add_argument("--n_class", type=int, default=29)
     p.add_argument("--batch_size", type=int, default=12)
     p.add_argument("--train_size", type=float, default=0.8)
@@ -102,6 +117,10 @@ def parse_args():
                    help="Total CPU cores for parallel fold evaluation.")
     p.add_argument("--no_frozenmore", action="store_true",
                    help="Also unfreeze token/value embeddings before embedding extraction")
+    p.add_argument("--n_hvg", type=int, default=3000,
+                   help="Number of highly variable genes to subset before feeding to scGPT. "
+                        "Matches scGPT paper Tutorial_Cell_Embedding protocol (1200–3000). "
+                        "Set to 0 to disable HVG selection (feed full vocab-matched genes).")
     p.add_argument("--preprocess", action="store_true",
                    help="Apply normalize_total+log1p before processing (for raw count datasets)")
     p.add_argument("--symbol_map", type=str,
@@ -205,15 +224,8 @@ def run_svc_cv(embeddings, labels, args):
         x_test  = embeddings[test_idx]
         y_test  = labels[test_idx]
 
-        if args.max_samples and len(x_train) > args.max_samples:
-            sampled_idx = np.random.choice(
-                len(x_train), args.max_samples, replace=False
-            )
-            x_train_fit = x_train[sampled_idx]
-            y_train_fit = y_train[sampled_idx]
-        else:
-            x_train_fit = x_train
-            y_train_fit = y_train
+        x_train_fit = x_train
+        y_train_fit = y_train
 
         probe = build_probe(x_train_fit, args)
         print(f"  Fold {fold_idx}/{args.cv_folds}: fitting SVC on "
@@ -243,7 +255,7 @@ def run_svc_cv(embeddings, labels, args):
             },
         }
 
-    fold_metrics = Parallel(n_jobs=n_fold_jobs, backend="loky")(
+    fold_metrics = Parallel(n_jobs=n_fold_jobs, backend="threading")(
         delayed(_run_fold)(fold_idx, train_idx, test_idx)
         for fold_idx, (train_idx, test_idx) in enumerate(splits, start=1)
     )
@@ -341,9 +353,39 @@ def main():
             config=vars(args),
         )
 
+    # ── HVG selection (scGPT paper Tutorial_Cell_Embedding protocol) ──────
+    # Done here (not in dataset.py) to keep scGPT source untouched.
+    # Writes a temp h5ad and points load_data at it.
+    h5ad_path_for_load = args.h5ad
+    _tmp_h5ad_to_cleanup = None
+    if args.n_hvg and args.n_hvg > 0:
+        import scanpy as sc
+        import tempfile
+        import atexit
+        print(f"\nApplying HVG selection (n_top_genes={args.n_hvg}) before load_data ...")
+        adata = sc.read_h5ad(args.h5ad)
+        print(f"  Input shape: {adata.shape}")
+        if args.n_hvg < adata.shape[1]:
+            flavor = "seurat_v3" if args.preprocess else "seurat"
+            print(f"  HVG flavor: {flavor} (preprocess={args.preprocess})")
+            sc.pp.highly_variable_genes(adata, n_top_genes=args.n_hvg, flavor=flavor)
+            adata = adata[:, adata.var.highly_variable].copy()
+            print(f"  HVG subset shape: {adata.shape}")
+            _tmp_h5ad_to_cleanup = tempfile.NamedTemporaryFile(
+                suffix=".h5ad", prefix=f"scgpt_hvg_{args.dataset_id}_", delete=False
+            ).name
+            adata.write_h5ad(_tmp_h5ad_to_cleanup)
+            atexit.register(lambda p=_tmp_h5ad_to_cleanup:
+                            os.path.exists(p) and os.unlink(p))
+            h5ad_path_for_load = _tmp_h5ad_to_cleanup
+            print(f"  Wrote HVG-filtered h5ad: {_tmp_h5ad_to_cleanup}")
+        else:
+            print(f"  Skipping HVG: n_hvg={args.n_hvg} >= n_vars={adata.shape[1]}")
+        del adata
+
     # load_data from scGPT/celltype/dataset.py returns 7 values
-    _train_loader, val_loader, class_names, type2idx, _, vocab, pad_token_id = load_data(
-        h5ad_path=args.h5ad,
+    train_loader, val_loader, class_names, type2idx, _, vocab, pad_token_id = load_data(
+        h5ad_path=h5ad_path_for_load,
         model_dir=args.model_dir,
         train_size=args.train_size,
         random_state=args.seed,
@@ -374,6 +416,9 @@ def main():
     x_val, y_val = extract_embeddings(model, val_loader, device)
     print(f"Embedding shape: {x_val.shape[1]} dims")
     print(f"Validation samples: {len(y_val)}")
+    print("Extracting training embeddings...")
+    x_train, y_train = extract_embeddings(model, train_loader, device)
+    print(f"Training samples: {len(y_train)}")
 
     cv_result = run_svc_cv(x_val, y_val, args)
 
@@ -397,8 +442,14 @@ def main():
     save_fold_metrics(os.path.join(out_dir, "probe_fold_metrics.csv"), cv_result)
 
     if args.save_embeddings:
-        np.save(os.path.join(out_dir, "embeddings_val.npy"), x_val)
-        np.save(os.path.join(out_dir, "labels_val.npy"), y_val)
+        np.save(os.path.join(out_dir, "embeddings_val.npy"),   x_val)
+        np.save(os.path.join(out_dir, "labels_val.npy"),       y_val)
+        np.save(os.path.join(out_dir, "embeddings_train.npy"), x_train)
+        np.save(os.path.join(out_dir, "labels_train.npy"),     y_train)
+        x_all = np.concatenate([x_train, x_val], axis=0)
+        y_all = np.concatenate([y_train, y_val], axis=0)
+        np.save(os.path.join(out_dir, "embeddings_all.npy"),   x_all)
+        np.save(os.path.join(out_dir, "labels_all.npy"),       y_all)
 
     print("\nProbe metrics")
     for split in ["train", "test"]:

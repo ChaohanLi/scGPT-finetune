@@ -36,8 +36,14 @@ set -euo pipefail
 # PREPROCESS="--preprocess"
 
 # Dataset: 20w_GSE196830 (raw counts, 29 classes)
-H5AD="/lichaohan/readData/20w_PBMC_GSE196830/20w_allcelltype.h5ad"
-DATASET_ID="20w_GSE196830"
+# H5AD="/lichaohan/readData/20w_PBMC_GSE196830/20w_allcelltype.h5ad"
+# DATASET_ID="20w_GSE196830"
+# N_CLASS=29
+# PREPROCESS="--preprocess"
+
+# Dataset: 40w_GSE196830 (raw counts, 29 classes)
+H5AD="/lichaohan/readData/40w_PBMC_GSE196830/GSE196830_40w_subset.h5ad"
+DATASET_ID="40w_GSE196830"
 N_CLASS=29
 PREPROCESS="--preprocess"
 
@@ -50,6 +56,7 @@ BATCH_SIZE=12
 N_JOBS=16
 PCA_DIM=100
 MAX_ITER=2000
+N_HVG=0                                # 0 = disable HVG selection (full gene vocab, matches scFoundation baseline)
 SAVE_EMBEDDINGS=""                     # set to "--save_embeddings" to also save embeddings_val.npy / labels_val.npy (needed for visualize.py)
 
 PYTHON="/lichaohan/miniconda3/envs/scvi/bin/python"
@@ -72,5 +79,6 @@ $PYTHON probe.py \
     --n_jobs      "${N_JOBS}" \
     --pca_dim     "${PCA_DIM}" \
     --max_iter    "${MAX_ITER}" \
+    --n_hvg       "${N_HVG}" \
     ${PREPROCESS} \
     ${SAVE_EMBEDDINGS}

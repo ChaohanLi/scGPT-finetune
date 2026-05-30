@@ -3,10 +3,12 @@ Paper-quality UMAP / t-SNE visualization of probe embeddings.
 
 Requires embeddings saved with --save_embeddings when running probe.py.
 Looks for:
-    <run_dir>/embeddings_val.npy   — (N, D) float32 embedding matrix
-    <run_dir>/labels_val.npy       — (N,)   int64  integer labels
-    <run_dir>/class_names.json     — list[str] label names (index = integer label)
-    <run_dir>/probe_metrics.json   — used for title / subtitle (optional)
+    <run_dir>/embeddings_{split}.npy  — (N, D) float32 embedding matrix
+    <run_dir>/labels_{split}.npy      — (N,)   int64  integer labels
+    <run_dir>/class_names.json        — list[str] label names (index = integer label)
+    <run_dir>/probe_metrics.json      — used for title / subtitle (optional)
+
+where split ∈ {val, train, all} (default: val)
 
 Usage examples:
     # Single run
@@ -22,6 +24,7 @@ Usage examples:
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import sys
 import warnings
@@ -121,6 +124,8 @@ def _plot_embedding(
     save_path:   str,
     point_size:  float,
     alpha:       float,
+    xlim:        tuple = None,
+    ylim:        tuple = None,
 ):
     unique_labels = sorted(np.unique(labels))
     n_classes     = len(unique_labels)
@@ -153,6 +158,10 @@ def _plot_embedding(
     ax.set_ylabel(f"{axis_label} 2")
     ax.set_xticks([])
     ax.set_yticks([])
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
@@ -192,12 +201,137 @@ def _plot_embedding(
     print(f"    Saved: {png_path}")
 
 
+# ── Joint mode: one shared reducer, three separate plots ───────────────────
+
+def _visualize_run_joint(run_dir: str, methods: list, max_cells: int, seed: int):
+    """
+    Load train + val embeddings, fit ONE shared reducer, then produce three
+    separate plots (train-only / val-only / train+val combined) all using the
+    same 2-D coordinate system.  Identical cell types occupy the same position
+    across all three figures, enabling direct visual comparison.
+    """
+    train_emb_p = os.path.join(run_dir, "embeddings_train.npy")
+    val_emb_p   = os.path.join(run_dir, "embeddings_val.npy")
+    train_lbl_p = os.path.join(run_dir, "labels_train.npy")
+    val_lbl_p   = os.path.join(run_dir, "labels_val.npy")
+    names_p     = os.path.join(run_dir, "class_names.json")
+    metrics_p   = os.path.join(run_dir, "probe_metrics.json")
+
+    for p in [train_emb_p, val_emb_p, train_lbl_p, val_lbl_p, names_p]:
+        if not os.path.exists(p):
+            print(
+                f"  [SKIP joint] {run_dir}\n"
+                f"    Missing: {os.path.basename(p)}\n"
+                f"    → Re-run probe.py with --save_embeddings"
+            )
+            return
+
+    emb_train = np.load(train_emb_p)
+    emb_val   = np.load(val_emb_p)
+    lbl_train = np.load(train_lbl_p)
+    lbl_val   = np.load(val_lbl_p)
+    with open(names_p) as f:
+        class_names = json.load(f)
+
+    n_train = len(lbl_train)
+    n_val   = len(lbl_val)
+    n_total = n_train + n_val
+    print(f"  Loaded: {n_train} train + {n_val} val = {n_total} cells × "
+          f"{emb_train.shape[1]} dims, {len(class_names)} classes")
+
+    run_name = os.path.basename(run_dir.rstrip("/"))
+    subtitle = ""
+    if os.path.exists(metrics_p):
+        with open(metrics_p) as f:
+            mdata = json.load(f)
+        m = mdata.get("metrics", {}).get("test", {})
+        parts = []
+        if "macro_f1" in m:
+            parts.append(f"macro F1={m['macro_f1']:.3f}")
+        if "balanced_accuracy" in m:
+            parts.append(f"bal acc={m['balanced_accuracy']:.3f}")
+        subtitle = "  ·  ".join(parts)
+
+    # ── combine, subsample, tag source ─────────────────────────────────
+    emb_combined = np.vstack([emb_train, emb_val])       # (N, D)
+    lbl_combined = np.concatenate([lbl_train, lbl_val])  # (N,)
+    src_combined = np.array([0] * n_train + [1] * n_val) # 0=train 1=val
+
+    if n_total > max_cells:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(n_total, max_cells, replace=False)
+        emb_combined = emb_combined[idx]
+        lbl_combined = lbl_combined[idx]
+        src_combined = src_combined[idx]
+        print(f"  Subsampled to {max_cells} cells for dimensionality reduction")
+
+    n = len(lbl_combined)
+    point_size = max(0.5, min(3.0, 30000 / n))
+    alpha      = max(0.4, min(0.7, 20000 / n))
+
+    vis_dir = os.path.join(run_dir, "vis_joint")
+    os.makedirs(vis_dir, exist_ok=True)
+
+    for method in methods:
+        print(f"  Computing {method.upper()} on combined train+val...", flush=True)
+        if method == "umap":
+            coords_combined = _reduce_umap(emb_combined, seed)
+        else:
+            coords_combined = _reduce_tsne(emb_combined, seed)
+
+        # ── shared axis limits (5 % padding) so all 3 plots are comparable ──
+        x_range = coords_combined[:, 0].max() - coords_combined[:, 0].min()
+        y_range = coords_combined[:, 1].max() - coords_combined[:, 1].min()
+        xlim = (coords_combined[:, 0].min() - x_range * 0.05,
+                coords_combined[:, 0].max() + x_range * 0.05)
+        ylim = (coords_combined[:, 1].min() - y_range * 0.05,
+                coords_combined[:, 1].max() + y_range * 0.05)
+
+        # ── split coords back by source ────────────────────────────────
+        mask_tr  = src_combined == 0
+        mask_val = src_combined == 1
+        subsets = [
+            ("train", coords_combined[mask_tr],  lbl_combined[mask_tr]),
+            ("val",   coords_combined[mask_val], lbl_combined[mask_val]),
+            ("all",   coords_combined,           lbl_combined),
+        ]
+
+        for tag, coords, lbl in subsets:
+            title = f"{run_name}  [{method.upper()}] [joint-{tag}]"
+            _plot_embedding(
+                coords, lbl, class_names,
+                method=method,
+                title=title,
+                subtitle=subtitle,
+                save_path=os.path.join(vis_dir, f"{method}_{tag}"),
+                point_size=point_size,
+                alpha=alpha,
+                xlim=xlim,
+                ylim=ylim,
+            )
+
+        # cache for reuse
+        np.save(os.path.join(vis_dir, f"{method}_coords.npy"), coords_combined)
+        np.save(os.path.join(vis_dir, f"{method}_src.npy"),    src_combined)
+        print(f"    Coords cached: {vis_dir}/{method}_coords.npy")
+
+
 # ── Visualize one run directory ───────────────────────────────────────────
 
-def visualize_run(run_dir: str, methods: list, max_cells: int, seed: int):
+def visualize_run(run_dir: str, methods: list, max_cells: int, seed: int, splits: list = None):
+    if splits is None:
+        splits = ["val"]
+    for split in splits:
+        if split == "joint":
+            _visualize_run_joint(run_dir, methods, max_cells, seed)
+        else:
+            _visualize_run_split(run_dir, methods, max_cells, seed, split)
+
+
+def _visualize_run_split(run_dir: str, methods: list, max_cells: int, seed: int, split: str = "val"):
     # ── check required files ─────────────────────────────────────────
-    emb_path    = os.path.join(run_dir, "embeddings_val.npy")
-    lbl_path    = os.path.join(run_dir, "labels_val.npy")
+    emb_path    = os.path.join(run_dir, f"embeddings_{split}.npy")
+    lbl_path    = os.path.join(run_dir, f"labels_{split}.npy")
     names_path  = os.path.join(run_dir, "class_names.json")
     metrics_path = os.path.join(run_dir, "probe_metrics.json")
 
@@ -248,7 +382,7 @@ def visualize_run(run_dir: str, methods: list, max_cells: int, seed: int):
     alpha      = max(0.4, min(0.7, 20000 / n))
 
     # ── run reductions ────────────────────────────────────────────────
-    vis_dir = os.path.join(run_dir, "vis")
+    vis_dir = os.path.join(run_dir, f"vis_{split}")
     os.makedirs(vis_dir, exist_ok=True)
 
     for method in methods:
@@ -258,7 +392,7 @@ def visualize_run(run_dir: str, methods: list, max_cells: int, seed: int):
         else:
             coords = _reduce_tsne(embeddings, seed)
 
-        title = f"{run_name}  [{method.upper()}]"
+        title = f"{run_name}  [{method.upper()}] [{split}]"
         save_path = os.path.join(vis_dir, method)
         _plot_embedding(
             coords, labels, class_names,
@@ -305,17 +439,44 @@ def parse_args():
         help="Number of runs to process in parallel (default: 1). "
              "Set to -1 to use all available CPU cores.",
     )
+    p.add_argument(
+        "--splits", type=str, default="val",
+        help="Comma-separated list of embedding splits to visualize. "
+             "Choices: val, train, all, joint. "
+             "joint loads train+val together in one shared coordinate system "
+             "and overlays them (● train, ▲ val) on a single plot. "
+             "Example: --splits val,all,joint  (default: val)",
+    )
+    p.add_argument(
+        "--run_name_filter", type=str, default=None,
+        help="Comma-separated substrings; only run directories whose name contains "
+             "ALL of the given substrings are processed. "
+             "Example: --run_name_filter 20260512,hgnc",
+    )
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     methods = ["umap", "tsne"] if args.method == "both" else [args.method]
+    splits  = [s.strip() for s in args.splits.split(",") if s.strip()]
+    valid_splits = {"val", "train", "all", "joint"}
+    bad = [s for s in splits if s not in valid_splits]
+    if bad:
+        print(f"Invalid split(s): {bad}. Choose from {valid_splits}")
+        sys.exit(1)
+
+    # ── run_name_filter ───────────────────────────────────────────────
+    filters = []
+    if args.run_name_filter:
+        filters = [f.strip() for f in args.run_name_filter.split(",") if f.strip()]
 
     run_dir = os.path.abspath(args.run_dir)
 
     # Determine whether run_dir itself is a run or a parent of runs
-    emb_in_dir = os.path.exists(os.path.join(run_dir, "embeddings_val.npy"))
+    emb_in_dir = any(
+        os.path.exists(os.path.join(run_dir, f"embeddings_{s}.npy")) for s in splits
+    )
     if emb_in_dir:
         run_dirs = [run_dir]
     else:
@@ -330,23 +491,70 @@ def main():
             print(f"No subdirectories found in {run_dir}")
             sys.exit(1)
 
-    print(f"Visualizing {len(run_dirs)} run(s) | methods={methods} | "
-          f"max_cells={args.max_cells} | seed={args.seed} | "
-          f"n_jobs={args.n_jobs}\n")
+    # ── apply name filter ─────────────────────────────────────────────
+    if filters:
+        run_dirs = [
+            rd for rd in run_dirs
+            if all(f in os.path.basename(rd) for f in filters)
+        ]
+        if not run_dirs:
+            print(f"No run directories match filter {filters}")
+            sys.exit(1)
 
-    def _do(rd):
+    print(f"Visualizing {len(run_dirs)} run(s) | methods={methods} | "
+          f"splits={splits} | max_cells={args.max_cells} | "
+          f"seed={args.seed} | n_jobs={args.n_jobs}")
+    if filters:
+        print(f"Filter: {filters}")
+    print()
+
+    total_cpus = os.cpu_count() or 1
+    n_parallel = args.n_jobs if args.n_jobs != -1 else total_cpus
+    n_parallel = max(1, min(n_parallel, len(run_dirs)))
+
+    def _do(rd, run_methods):
         print(f"→ {os.path.basename(rd)}", flush=True)
-        visualize_run(rd, methods, args.max_cells, args.seed)
+        visualize_run(rd, run_methods, args.max_cells, args.seed, splits)
         print()
 
-    if args.n_jobs == 1 or len(run_dirs) == 1:
-        for rd in run_dirs:
-            _do(rd)
-    else:
+    # ── Phase 1: UMAP — numba is fork-safe, run in parallel ─────────
+    if "umap" in methods:
+        if n_parallel > 1:
+            print(f"UMAP phase: {n_parallel} workers in parallel")
         from joblib import Parallel, delayed
-        Parallel(n_jobs=args.n_jobs, backend="loky", verbose=0)(
-            delayed(_do)(rd) for rd in run_dirs
+        Parallel(n_jobs=n_parallel, backend="loky", verbose=0)(
+            delayed(_do)(rd, ["umap"]) for rd in run_dirs
         )
+
+    # ── Phase 2: t-SNE — Barnes-Hut Cython OpenMP is NOT fork-safe.
+    #    Even sequential execution can segfault when loky workers from the UMAP
+    #    phase leave behind lingering OpenMP thread-pool state.
+    #    Fix: run each t-SNE in a freshly spawned (not forked) subprocess so
+    #    every run gets a completely clean process image. ────────────────────
+    if "tsne" in methods:
+        if "umap" in methods:
+            print(f"\nt-SNE phase: one spawned subprocess per run (OpenMP isolation)")
+        ctx = mp.get_context("spawn")
+        for rd in run_dirs:
+            p = ctx.Process(
+                target=_tsne_worker,
+                args=(rd, args.max_cells, args.seed, splits),
+            )
+            p.start()
+            p.join()
+            if p.exitcode != 0:
+                print(f"  [WARN] t-SNE subprocess exited with code {p.exitcode} "
+                      f"for {os.path.basename(rd)}")
+
+
+def _tsne_worker(rd: str, max_cells: int, seed: int, splits: list):
+    """Run t-SNE for one run directory in an isolated spawned subprocess.
+
+    Must be a module-level function so it is picklable by multiprocessing spawn.
+    """
+    print(f"→ {os.path.basename(rd)}", flush=True)
+    visualize_run(rd, ["tsne"], max_cells, seed, splits)
+    print()
 
 
 if __name__ == "__main__":
